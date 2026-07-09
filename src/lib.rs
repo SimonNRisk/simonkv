@@ -6,15 +6,17 @@ pub struct KVStore {
 
 impl KVStore {
     pub fn new() -> Self {
-        KVStore { map: HashMap::new() }
+        KVStore {
+            map: HashMap::new(),
+        }
     }
     pub fn set(&mut self, key: String, value: String) {
         self.map.insert(key, value);
     }
-    pub fn get(&self, key:&str) -> Option<&str> {
+    pub fn get(&self, key: &str) -> Option<&str> {
         self.map.get(key).map(|v| v.as_str())
     }
-    pub fn delete(&mut self, key:&str) -> Option<String> {
+    pub fn delete(&mut self, key: &str) -> Option<String> {
         self.map.remove(key)
     }
 }
@@ -22,7 +24,6 @@ impl KVStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn set_get_roundtrip() {
