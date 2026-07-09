@@ -18,3 +18,60 @@ impl KVStore {
         self.map.remove(key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    #[test]
+    fn set_get_roundtrip() {
+        let mut store = KVStore::new();
+        let key = "K";
+        let val = "V";
+        store.set(key.into(), val.into());
+        assert_eq!(store.get(key), Some(val));
+    }
+
+    #[test]
+    fn get_empty_value_returns_none() {
+        let store = KVStore::new();
+        assert_eq!(store.get("K".into()), None);
+    }
+
+    #[test]
+    fn get_empty_value_is_distinct_from_missing() {
+        let mut store = KVStore::new();
+        store.set("K".into(), "".into());
+        assert_eq!(store.get("K"), Some(""));
+        assert_eq!(store.get("absent"), None);
+    }
+
+    #[test]
+    fn set_delete_roundtrip() {
+        let mut store = KVStore::new();
+        let key = "K";
+        let val = "V";
+
+        store.set(key.into(), val.into());
+        assert_eq!(store.delete(key), Some(val.into()));
+    }
+
+    #[test]
+    fn set_delete_get_returns_none() {
+        let mut store = KVStore::new();
+        let key = "K";
+        let val = "V";
+
+        store.set(key.into(), val.into());
+        assert_eq!(store.delete(key), Some(val.to_string()));
+        assert_eq!(store.get(key), None);
+    }
+
+    #[test]
+    fn delete_absent_key_returns_none() {
+        let mut store = KVStore::new();
+        let key = "K";
+        assert_eq!(store.delete(key), None);
+    }
+}
