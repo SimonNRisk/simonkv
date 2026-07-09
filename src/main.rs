@@ -1,3 +1,8 @@
+use simonkv::KVStore;
+
 fn main() {
-    println!("Hello, world!");
+    let mut kvstore = KVStore::new();
+    kvstore.set(String::from("Test"), String::from("1"));
+    let fetched_val = kvstore.get(String::from("Test"));
+    println!("{fetched_val}");
 }
