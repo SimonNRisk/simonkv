@@ -13,4 +13,10 @@ fn main() {
         Some(val) => println!("Got {val}"),
         None => println!("No value")
     }
+    let deleted_fetch_val = kvstore.delete("Test");
+    match deleted_fetch_val {
+        Some(val) => println!("Successfully deleted {val}"),
+        None => println!("Could not delete")
+    }
+
 }

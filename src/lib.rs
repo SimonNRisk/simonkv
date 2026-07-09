@@ -14,7 +14,7 @@ impl KVStore {
     pub fn get(&self, key:&str) -> Option<&str> {
         self.map.get(key).map(|v| v.as_str())
     }
-    pub fn delete(&mut self, key:String) {
-        self.map.remove(&key);
+    pub fn delete(&mut self, key:&str) -> Option<String> {
+        self.map.remove(key)
     }
 }
