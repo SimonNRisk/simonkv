@@ -2,6 +2,8 @@
 name = "simonkv"
 version = "0.1.0"
 edition = "2024"
+description = "A tiny from-scratch key-value store, built while learning Rust."
+license = "MIT"
 
 [dependencies]
 tempfile = "3.27.0"
