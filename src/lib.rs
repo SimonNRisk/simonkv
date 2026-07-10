@@ -33,60 +33,62 @@ impl KVStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
-    fn make_store(filename: &str) -> KVStore {
-        let path = format!("{}.log", filename);
-        let _ = std::fs::remove_file(&path);
-        KVStore::open(&path).unwrap()
+    fn make_store() -> (KVStore, NamedTempFile) {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+        let store = KVStore::open(&path).unwrap();
+        (store, file)
     }
 
     #[test]
     fn set_get_roundtrip() {
-        let mut store = make_store("set_get_roundtrip");
+        let (mut store, _) = make_store();
         let key = "K";
         let val = "V";
-        let _ = store.set(key.into(), val.into());
+        store.set(key.into(), val.into()).unwrap();
         assert_eq!(store.get(key), Some(val));
     }
 
     #[test]
     fn get_empty_value_returns_none() {
-        let store = make_store("get_empty_value_returns_none");
+        let (store, _) = make_store();
         assert_eq!(store.get("K".into()), None);
     }
 
     #[test]
     fn get_empty_value_is_distinct_from_missing() {
-        let mut store = make_store("get_empty_value_is_distinct_from_missing");
-        let _ = store.set("K".into(), "".into());
+        let (mut store, _) = make_store();
+        store.set("K".into(), "".into()).unwrap();
         assert_eq!(store.get("K"), Some(""));
         assert_eq!(store.get("absent"), None);
     }
 
     #[test]
     fn set_delete_roundtrip() {
-        let mut store = make_store("set_delete_roundtrip");
+        let (mut store, _) = make_store();
         let key = "K";
         let val = "V";
 
-        let _ = store.set(key.into(), val.into());
+        store.set(key.into(), val.into()).unwrap();
         assert_eq!(store.delete(key).unwrap(), Some(val.into()));
     }
 
     #[test]
     fn set_delete_get_returns_none() {
-        let mut store = make_store("set_delete_get_returns_none");
+        let (mut store, _) = make_store();
         let key = "K";
         let val = "V";
 
-        let _ = store.set(key.into(), val.into());
+        store.set(key.into(), val.into()).unwrap();
         assert_eq!(store.delete(key).unwrap(), Some(val.to_string()));
         assert_eq!(store.get(key), None);
     }
 
     #[test]
     fn delete_absent_key_returns_none() {
-        let mut store = make_store("set_dedelete_absent_key_returns_noneete_get_returns_none");
+        let (mut store, _) = make_store();
         let key = "K";
         assert_eq!(store.delete(key).unwrap(), None);
     }
