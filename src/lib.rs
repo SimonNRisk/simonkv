@@ -92,4 +92,41 @@ mod tests {
         let key = "K";
         assert_eq!(store.delete(key).unwrap(), None);
     }
+
+    #[test]
+    fn set_writes_to_log() {
+        let (mut store, file) = make_store();
+
+        store.set("K".into(), "V".into()).unwrap();
+
+        drop(store);
+
+        let contents = std::fs::read_to_string(file.path()).unwrap();
+        assert_eq!(contents, "SET K V\n")
+    }
+
+    #[test]
+    fn del_writes_to_log() {
+        let (mut store, file) = make_store();
+
+        store.delete("K".into()).unwrap();
+
+        drop(store);
+
+        let contents = std::fs::read_to_string(file.path()).unwrap();
+        assert_eq!(contents, "DEL K\n")
+    }
+
+    #[test]
+    fn set_del_roundtrip_writes_to_log() {
+        let (mut store, file) = make_store();
+
+        store.set("K".into(), "V".into()).unwrap();
+        store.delete("K").unwrap();
+
+        drop(store);
+
+        let contents = std::fs::read_to_string(file.path()).unwrap();
+        assert_eq!(contents, "SET K V\nDEL K\n")
+    }
 }
