@@ -38,7 +38,7 @@ mod tests {
 
     fn make_store() -> (KVStore, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
-        let path = file.path().to_str().unwrap();
+        let path = file.path();
         let store = KVStore::open(&path).unwrap();
         (store, file)
     }
