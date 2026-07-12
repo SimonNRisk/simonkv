@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 pub struct KVStore {
@@ -10,12 +10,34 @@ pub struct KVStore {
 
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        // io::Result shorthand for Result<T, std::io::Error>. Tells user it fails at IO
-        let log = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(KVStore {
-            map: HashMap::new(),
-            log,
-        })
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(path)?;
+
+        let mut map = HashMap::new();
+        let reader = BufReader::new(&log);
+        /*
+        Logic here for replaying from log
+        for line in log:
+            break line into parts
+                if part[0] = set
+                    map.insert(part[1],part[2])
+                if part[0] = del
+                    map.remove(par[1])
+         */
+        for line in reader.lines() {
+            let result = line.unwrap();
+            let words: Vec<&str> = result.split_whitespace().collect();
+            if words[0] == "SET" {
+                map.insert(words[1].into(), words[2].into());
+            } else if words[0] == "DEL" {
+                map.remove(words[1]);
+            }
+        }
+
+        Ok(KVStore { map, log })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
         writeln!(self.log, "SET {} {}", key, value)?;
@@ -38,8 +60,7 @@ mod tests {
 
     fn make_store() -> (KVStore, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
-        let path = file.path();
-        let store = KVStore::open(&path).unwrap();
+        let store = KVStore::open(file.path()).unwrap();
         (store, file)
     }
 
