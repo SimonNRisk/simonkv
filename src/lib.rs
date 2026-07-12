@@ -134,9 +134,41 @@ mod tests {
     #[test]
     fn open_restores_map_from_log() {
         let (mut store, file) = make_store();
+
         store.set("K".into(), "V".into()).unwrap();
+
         drop(store);
+
         let store = KVStore::open(file.path()).unwrap();
         assert_eq!(store.get("K"), Some("V"));
+    }
+
+    #[test]
+    fn open_stores_most_recent_set_from_log() {
+        let (mut store, file) = make_store();
+
+        store.set("K".into(), "V".into()).unwrap();
+        store.set("K".into(), "V2".into()).unwrap();
+
+        drop(store);
+
+        let store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K"), Some("V2"));
+    }
+
+    #[test]
+    fn open_restores_most_recent_data_set_delete() {
+        let (mut store, file) = make_store();
+
+        store.set("K".into(), "V".into()).unwrap();
+        store.set("K2".into(), "V2".into()).unwrap();
+
+        store.delete("K").unwrap();
+
+        drop(store);
+
+        let store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K"), None);
+        assert_eq!(store.get("K2"), Some("V2"));
     }
 }
