@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::path::Path;
 
 pub struct KVStore {
     map: HashMap<String, String>,
@@ -8,7 +9,7 @@ pub struct KVStore {
 }
 
 impl KVStore {
-    pub fn open(path: &str) -> io::Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         // io::Result shorthand for Result<T, std::io::Error>. Tells user it fails at IO
         let log = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(KVStore {
@@ -128,5 +129,14 @@ mod tests {
 
         let contents = std::fs::read_to_string(file.path()).unwrap();
         assert_eq!(contents, "SET K V\nDEL K\n")
+    }
+
+    #[test]
+    fn open_restores_map_from_log() {
+        let (mut store, file) = make_store();
+        store.set("K".into(), "V".into()).unwrap();
+        drop(store);
+        let store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K"), Some("V"));
     }
 }
