@@ -8,6 +8,11 @@ pub struct KVStore {
     log: File,
 }
 
+enum Command {
+    Set(String, String),
+    Delete(String),
+}
+
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let log = OpenOptions::new()
@@ -18,25 +23,20 @@ impl KVStore {
 
         let mut map = HashMap::new();
         let reader = BufReader::new(&log);
-        /*
-        Logic here for replaying from log
-        for line in log:
-            break line into parts
-                if part[0] = set
-                    map.insert(part[1],part[2])
-                if part[0] = del
-                    map.remove(par[1])
-         */
+
         for line in reader.lines() {
-            let result = line.unwrap();
-            let words: Vec<&str> = result.split_whitespace().collect();
-            if words[0] == "SET" {
-                map.insert(words[1].into(), words[2].into());
-            } else if words[0] == "DEL" {
-                map.remove(words[1]);
+            let line = line?;
+            let command = Self::parse_line(&line)?;
+
+            match command {
+                Command::Set(key, value) => {
+                    map.insert(key, value);
+                }
+                Command::Delete(key) => {
+                    map.remove(&key);
+                }
             }
         }
-
         Ok(KVStore { map, log })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
@@ -50,6 +50,22 @@ impl KVStore {
     pub fn delete(&mut self, key: &str) -> io::Result<Option<String>> {
         writeln!(self.log, "DEL {}", key)?;
         Ok(self.map.remove(key))
+    }
+    fn parse_line(line: &str) -> io::Result<Command> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+
+        if words.len() == 3 && words[0] == "SET" {
+            return Ok(Command::Set(words[1].to_string(), words[2].to_string()));
+        }
+
+        if words.len() == 2 && words[0] == "DEL" {
+            return Ok(Command::Delete(words[1].to_string()));
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed log record",
+        ))
     }
 }
 
