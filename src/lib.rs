@@ -208,4 +208,92 @@ mod tests {
         assert_eq!(store.get("K"), None);
         assert_eq!(store.get("K2"), Some("V2"));
     }
+
+    #[test]
+    fn malformed_command_returns_error() {
+        let (store, mut file) = make_store();
+        let key = String::from("K");
+        let value = String::from("V");
+
+        writeln!(file, "BAD {} {}", &key, &value).unwrap();
+
+        drop(store);
+
+        let result = KVStore::open(file.path());
+
+        assert!(result.is_err());
+
+        let error = match KVStore::open(file.path()) {
+            Ok(_) => panic!("expected malformed log to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn missing_set_argument_returns_err() {
+        let (store, mut file) = make_store();
+        let key = String::from("K");
+
+        writeln!(file, "SET {}", &key).unwrap();
+
+        drop(store);
+
+        let result = KVStore::open(file.path());
+
+        assert!(result.is_err());
+
+        let error = match KVStore::open(file.path()) {
+            Ok(_) => panic!("expected malformed log to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn missing_delete_argument_returns_err() {
+        let (store, mut file) = make_store();
+
+        writeln!(file, "DEL").unwrap();
+
+        drop(store);
+
+        let result = KVStore::open(file.path());
+
+        assert!(result.is_err());
+
+        let error = match KVStore::open(file.path()) {
+            Ok(_) => panic!("expected malformed log to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn valid_recorded_followed_by_malformed_record_returns_err() {
+        let (store, mut file) = make_store();
+
+        let key1 = String::from("K1");
+        let value1 = String::from("V1");
+        writeln!(file, "SET {} {}", &key1, &value1).unwrap();
+
+        let key2 = String::from("K2");
+        writeln!(file, "SET {}", &key2).unwrap();
+
+        drop(store);
+
+        let result = KVStore::open(file.path());
+
+        assert!(result.is_err());
+
+        let error = match KVStore::open(file.path()) {
+            Ok(_) => panic!("expected malformed log to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
