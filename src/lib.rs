@@ -44,7 +44,8 @@ impl KVStore {
         Ok(KVStore { map, log })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
-        writeln!(self.log, "SET {} {}", key, value)?;
+        let record = KVStore::encode_record(SET_TAG, &key, &value)?;
+        self.log.write_all(&record)?;
         self.map.insert(key, value);
         Ok(())
     }
