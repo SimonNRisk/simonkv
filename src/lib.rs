@@ -44,7 +44,7 @@ impl KVStore {
         Ok(KVStore { map, log })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
-        let record = KVStore::encode_record(SET_TAG, &key, &value)?;
+        let record = Self::encode_set(&key, &value)?;
         self.log.write_all(&record)?;
         self.map.insert(key, value);
         Ok(())
@@ -53,7 +53,8 @@ impl KVStore {
         self.map.get(key).map(|v| v.as_str())
     }
     pub fn delete(&mut self, key: &str) -> io::Result<Option<String>> {
-        writeln!(self.log, "DEL {}", key)?;
+        let record = Self::encode_delete(key)?;
+        self.log.write_all(&record)?;
         Ok(self.map.remove(key))
     }
     fn parse_line(line: &str) -> io::Result<Command> {
@@ -82,7 +83,15 @@ impl KVStore {
 
         header
     }
-    fn encode_record(operation: u8, key: &str, value: &str) -> io::Result<Vec<u8>> {
+    fn encode_set(key: &str, value: &str) -> io::Result<Vec<u8>> {
+        Self::encode_record(SET_TAG, key, value.as_bytes())
+    }
+
+    fn encode_delete(key: &str) -> io::Result<Vec<u8>> {
+        Self::encode_record(DELETE_TAG, key, &[])
+    }
+
+    fn encode_record(operation: u8, key: &str, value_bytes: &[u8]) -> io::Result<Vec<u8>> {
         if !matches!(operation, SET_TAG | DELETE_TAG) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -91,11 +100,10 @@ impl KVStore {
         }
 
         let key_bytes = key.as_bytes();
-        let key_len = u16::try_from(key.as_bytes().len())
+        let key_len = u16::try_from(key_bytes.len())
             .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Key too large"))?;
 
-        let value_bytes = value.as_bytes();
-        let value_len = u16::try_from(value.as_bytes().len())
+        let value_len = u16::try_from(value_bytes.len())
             .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Value too large"))?;
 
         let header = KVStore::encode_header(operation, key_len, value_len);
