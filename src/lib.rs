@@ -81,6 +81,33 @@ impl KVStore {
 
         header
     }
+    fn encode_record(operation: u8, key: &str, value: &str) -> io::Result<Vec<u8>> {
+        if !matches!(operation, SET_TAG | DELETE_TAG) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unsupported operation",
+            ));
+        }
+
+        let key_bytes = key.as_bytes();
+        let key_len = u16::try_from(key.as_bytes().len())
+            .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Key too large"))?;
+
+        let value_bytes = value.as_bytes();
+        let value_len = u16::try_from(value.as_bytes().len())
+            .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Value too large"))?;
+
+        let header = KVStore::encode_header(operation, key_len, value_len);
+
+        let mut result: Vec<u8> =
+            Vec::with_capacity(header.len() + key_bytes.len() + value_bytes.len());
+
+        result.extend_from_slice(&header);
+        result.extend_from_slice(key_bytes);
+        result.extend_from_slice(value_bytes);
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
