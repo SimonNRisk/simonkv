@@ -13,6 +13,10 @@ enum Command {
     Delete(String),
 }
 
+const HEADER_LEN: usize = 2 + 2 + 1;
+const SET_TAG: u8 = 0x01; // Just a hex representation for 1
+const DELETE_TAG: u8 = 0x02; // Just a hex representation for 2
+
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let log = OpenOptions::new()
@@ -66,6 +70,16 @@ impl KVStore {
             io::ErrorKind::InvalidData,
             "malformed log record",
         ))
+    }
+    fn encode_header(operation: u8, key_len: u16, value_len: u16) -> [u8; HEADER_LEN] {
+        let mut header = [0u8; HEADER_LEN];
+
+        header[0] = operation;
+
+        header[1..3].copy_from_slice(&key_len.to_be_bytes());
+        header[3..5].copy_from_slice(&value_len.to_be_bytes());
+
+        header
     }
 }
 
@@ -295,5 +309,12 @@ mod tests {
         };
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn encodes_header() {
+        let header = KVStore::encode_header(SET_TAG, 3, 4);
+
+        assert_eq!(header, [0x01, 0x00, 0x03, 0x00, 0x04])
     }
 }
