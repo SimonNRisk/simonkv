@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 pub struct KVStore {
@@ -26,19 +26,12 @@ impl KVStore {
             .open(path)?;
 
         let mut map = HashMap::new();
-        let reader = BufReader::new(&log);
+        let mut reader = &log;
 
-        for line in reader.lines() {
-            let line = line?;
-            let command = Self::parse_line(&line)?;
-
-            match command {
-                Command::Set(key, value) => {
-                    map.insert(key, value);
-                }
-                Command::Delete(key) => {
-                    map.remove(&key);
-                }
+        loop {
+            match Self::read_record(&mut reader)? {
+                Some(command) => Self::apply_command(&mut map, command),
+                None => break,
             }
         }
         Ok(KVStore { map, log })
@@ -57,21 +50,67 @@ impl KVStore {
         self.log.write_all(&record)?;
         Ok(self.map.remove(key))
     }
-    fn parse_line(line: &str) -> io::Result<Command> {
-        let words: Vec<&str> = line.split_whitespace().collect();
+    fn read_record(reader: &mut impl Read) -> io::Result<Option<Command>> {
+        let mut header = [0u8; HEADER_LEN];
 
-        if words.len() == 3 && words[0] == "SET" {
-            return Ok(Command::Set(words[1].to_string(), words[2].to_string()));
+        // A clean EOF before a new record is normal. Once the first byte
+        // exists, however, the rest of the header must also exist.
+        match reader.read_exact(&mut header[..1]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         }
 
-        if words.len() == 2 && words[0] == "DEL" {
-            return Ok(Command::Delete(words[1].to_string()));
-        }
+        // At this point, we know we have content to read
+        reader.read_exact(&mut header[1..]).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated log header")
+            } else {
+                error
+            }
+        })?;
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "malformed log record",
-        ))
+        let operation = header[0];
+        let key_len = u16::from_be_bytes([header[1], header[2]]) as usize;
+        let value_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+
+        let mut payload = vec![0u8; key_len + value_len];
+        reader.read_exact(&mut payload).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated log payload")
+            } else {
+                error
+            }
+        })?;
+
+        let key = String::from_utf8(payload[..key_len].to_vec()).map_err(|_error| {
+            io::Error::new(io::ErrorKind::InvalidData, "log key is not valid UTF-8")
+        })?;
+        let value = String::from_utf8(payload[key_len..].to_vec()).map_err(|_error| {
+            io::Error::new(io::ErrorKind::InvalidData, "log value is not valid UTF-8")
+        })?;
+
+        match operation {
+            SET_TAG => Ok(Some(Command::Set(key, value))),
+            DELETE_TAG => Ok(Some(Command::Delete(key))),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown log operation",
+            )),
+        }
+    }
+
+    fn apply_command(map: &mut HashMap<String, String>, command: Command) {
+        match command {
+            Command::Set(key, value) => {
+                map.insert(key, value);
+            }
+            Command::Delete(key) => {
+                map.remove(&key);
+            }
+        }
     }
     fn encode_header(operation: u8, key_len: u16, value_len: u16) -> [u8; HEADER_LEN] {
         let mut header = [0u8; HEADER_LEN];
@@ -189,8 +228,8 @@ mod tests {
 
         drop(store);
 
-        let contents = std::fs::read_to_string(file.path()).unwrap();
-        assert_eq!(contents, "SET K V\n")
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(contents, vec![0x01, 0x00, 0x01, 0x00, 0x01, b'K', b'V']);
     }
 
     #[test]
@@ -201,8 +240,8 @@ mod tests {
 
         drop(store);
 
-        let contents = std::fs::read_to_string(file.path()).unwrap();
-        assert_eq!(contents, "DEL K\n")
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(contents, vec![0x02, 0x00, 0x01, 0x00, 0x00, b'K']);
     }
 
     #[test]
@@ -214,8 +253,13 @@ mod tests {
 
         drop(store);
 
-        let contents = std::fs::read_to_string(file.path()).unwrap();
-        assert_eq!(contents, "SET K V\nDEL K\n")
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(
+            contents,
+            vec![
+                0x01, 0x00, 0x01, 0x00, 0x01, b'K', b'V', 0x02, 0x00, 0x01, 0x00, 0x00, b'K'
+            ]
+        );
     }
 
     #[test]
@@ -259,92 +303,43 @@ mod tests {
         assert_eq!(store.get("K2"), Some("V2"));
     }
 
-    #[test]
-    fn malformed_command_returns_error() {
-        let (store, mut file) = make_store();
-        let key = String::from("K");
-        let value = String::from("V");
-
-        writeln!(file, "BAD {} {}", &key, &value).unwrap();
-
-        drop(store);
-
-        let result = KVStore::open(file.path());
-
-        assert!(result.is_err());
+    fn assert_open_rejects(bytes: &[u8]) {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
 
         let error = match KVStore::open(file.path()) {
             Ok(_) => panic!("expected malformed log to fail"),
             Err(error) => error,
         };
 
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn missing_set_argument_returns_err() {
-        let (store, mut file) = make_store();
-        let key = String::from("K");
-
-        writeln!(file, "SET {}", &key).unwrap();
-
-        drop(store);
-
-        let result = KVStore::open(file.path());
-
-        assert!(result.is_err());
-
-        let error = match KVStore::open(file.path()) {
-            Ok(_) => panic!("expected malformed log to fail"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    fn unknown_operation_returns_error() {
+        assert_open_rejects(&[0xff, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
-    fn missing_delete_argument_returns_err() {
-        let (store, mut file) = make_store();
-
-        writeln!(file, "DEL").unwrap();
-
-        drop(store);
-
-        let result = KVStore::open(file.path());
-
-        assert!(result.is_err());
-
-        let error = match KVStore::open(file.path()) {
-            Ok(_) => panic!("expected malformed log to fail"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    fn truncated_header_returns_error() {
+        assert_open_rejects(&[SET_TAG, 0x00]);
     }
 
     #[test]
-    fn valid_recorded_followed_by_malformed_record_returns_err() {
-        let (store, mut file) = make_store();
+    fn truncated_payload_returns_error() {
+        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x01]);
+    }
 
-        let key1 = String::from("K1");
-        let value1 = String::from("V1");
-        writeln!(file, "SET {} {}", &key1, &value1).unwrap();
+    #[test]
+    fn invalid_utf8_returns_error() {
+        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0xff]);
+    }
 
-        let key2 = String::from("K2");
-        writeln!(file, "SET {}", &key2).unwrap();
-
-        drop(store);
-
-        let result = KVStore::open(file.path());
-
-        assert!(result.is_err());
-
-        let error = match KVStore::open(file.path()) {
-            Ok(_) => panic!("expected malformed log to fail"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    #[test]
+    fn valid_record_followed_by_truncated_record_returns_error() {
+        let mut bytes = KVStore::encode_set("K1", "V1").unwrap();
+        bytes.extend_from_slice(&[SET_TAG, 0x00]);
+        assert_open_rejects(&bytes);
     }
 
     #[test]
