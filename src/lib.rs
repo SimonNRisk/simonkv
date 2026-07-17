@@ -13,7 +13,7 @@ enum Command {
     Delete(String),
 }
 
-const HEADER_LEN: usize = 2 + 2 + 1;
+const HEADER_LEN: usize = 1 + 2 + 4;
 const SET_TAG: u8 = 0x01; // Just a hex representation for 1
 const DELETE_TAG: u8 = 0x02; // Just a hex representation for 2
 
@@ -74,7 +74,7 @@ impl KVStore {
 
         let operation = header[0];
         let key_len = u16::from_be_bytes([header[1], header[2]]) as usize;
-        let value_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let value_len = u32::from_be_bytes([header[3], header[4], header[5], header[6]]) as usize;
 
         let mut payload = vec![0u8; key_len + value_len];
         reader.read_exact(&mut payload).map_err(|error| {
@@ -112,13 +112,13 @@ impl KVStore {
             }
         }
     }
-    fn encode_header(operation: u8, key_len: u16, value_len: u16) -> [u8; HEADER_LEN] {
+    fn encode_header(operation: u8, key_len: u16, value_len: u32) -> [u8; HEADER_LEN] {
         let mut header = [0u8; HEADER_LEN];
 
         header[0] = operation;
 
         header[1..3].copy_from_slice(&key_len.to_be_bytes());
-        header[3..5].copy_from_slice(&value_len.to_be_bytes());
+        header[3..7].copy_from_slice(&value_len.to_be_bytes());
 
         header
     }
@@ -142,7 +142,7 @@ impl KVStore {
         let key_len = u16::try_from(key_bytes.len())
             .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Key too large"))?;
 
-        let value_len = u16::try_from(value_bytes.len())
+        let value_len = u32::try_from(value_bytes.len())
             .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Value too large"))?;
 
         let header = KVStore::encode_header(operation, key_len, value_len);
@@ -229,7 +229,10 @@ mod tests {
         drop(store);
 
         let contents = std::fs::read(file.path()).unwrap();
-        assert_eq!(contents, vec![0x01, 0x00, 0x01, 0x00, 0x01, b'K', b'V']);
+        assert_eq!(
+            contents,
+            vec![0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'K', b'V']
+        );
     }
 
     #[test]
@@ -241,7 +244,10 @@ mod tests {
         drop(store);
 
         let contents = std::fs::read(file.path()).unwrap();
-        assert_eq!(contents, vec![0x02, 0x00, 0x01, 0x00, 0x00, b'K']);
+        assert_eq!(
+            contents,
+            vec![0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, b'K']
+        );
     }
 
     #[test]
@@ -257,7 +263,8 @@ mod tests {
         assert_eq!(
             contents,
             vec![
-                0x01, 0x00, 0x01, 0x00, 0x01, b'K', b'V', 0x02, 0x00, 0x01, 0x00, 0x00, b'K'
+                0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'K', b'V', 0x02, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, b'K'
             ]
         );
     }
@@ -317,7 +324,7 @@ mod tests {
 
     #[test]
     fn unknown_operation_returns_error() {
-        assert_open_rejects(&[0xff, 0x00, 0x00, 0x00, 0x00]);
+        assert_open_rejects(&[0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
@@ -327,12 +334,12 @@ mod tests {
 
     #[test]
     fn truncated_payload_returns_error() {
-        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x01]);
+        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]);
     }
 
     #[test]
     fn invalid_utf8_returns_error() {
-        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0xff]);
+        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff]);
     }
 
     #[test]
@@ -346,7 +353,7 @@ mod tests {
     fn encodes_header() {
         let header = KVStore::encode_header(SET_TAG, 3, 4);
 
-        assert_eq!(header, [0x01, 0x00, 0x03, 0x00, 0x04])
+        assert_eq!(header, [0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04])
     }
 
     #[test]
