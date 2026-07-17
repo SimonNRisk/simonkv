@@ -15,7 +15,6 @@ enum Command {
 
 struct Location {
     offset: u64,
-    length: u64,
 }
 
 struct DecodedRecord {
@@ -44,13 +43,7 @@ impl KVStore {
                 Some(record) => {
                     match record.command {
                         Command::Set(key, _) => {
-                            keydir.insert(
-                                key,
-                                Location {
-                                    offset,
-                                    length: record.length,
-                                },
-                            );
+                            keydir.insert(key, Location { offset });
                         }
                         Command::Delete(key) => {
                             keydir.remove(&key);
@@ -67,13 +60,7 @@ impl KVStore {
         let record = Self::encode_set(&key, &value)?;
         let offset = self.log.metadata()?.len();
         self.log.write_all(&record)?;
-        self.keydir.insert(
-            key,
-            Location {
-                offset,
-                length: record.len() as u64,
-            },
-        );
+        self.keydir.insert(key, Location { offset });
         Ok(())
     }
     pub fn get(&mut self, key: &str) -> io::Result<Option<String>> {
@@ -89,13 +76,6 @@ impl KVStore {
                 "keydir points past the end of the log",
             ));
         };
-
-        if record.length != location.length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "keydir record length does not match log record",
-            ));
-        }
 
         match record.command {
             Command::Set(record_key, value) if record_key == key => Ok(Some(value)),
