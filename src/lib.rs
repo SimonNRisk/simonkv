@@ -348,4 +348,36 @@ mod tests {
 
         assert_eq!(header, [0x01, 0x00, 0x03, 0x00, 0x04])
     }
+
+    #[test]
+    fn handles_whitespace_in_key_value() {
+        let key = "   whitespace.   ";
+        let value = "    more white space   ";
+
+        let (mut store, file) = make_store();
+
+        store.set(key.to_string(), value.to_string()).unwrap();
+
+        drop(store);
+
+        let store = KVStore::open(file).unwrap();
+
+        assert_eq!(store.get(key), Some(value));
+    }
+
+    #[test]
+    fn handles_newlines_in_key_value() {
+        let key = "\n new linen\n\n";
+        let value = "\n\n\n\n newer line \n";
+
+        let (mut store, file) = make_store();
+
+        store.set(key.to_string(), value.to_string()).unwrap();
+
+        drop(store);
+
+        let store = KVStore::open(file).unwrap();
+
+        assert_eq!(store.get(key), Some(value));
+    }
 }
