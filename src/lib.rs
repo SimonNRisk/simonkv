@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct KVStore {
     keydir: HashMap<String, Location>,
     log: File,
+    path: PathBuf,
 }
 
 enum Command {
@@ -92,6 +93,17 @@ impl KVStore {
         self.keydir.remove(key);
         Ok(old_value)
     }
+
+
+    pub fn compact(&mut self) -> io::Result<()> {
+        let compacted_log = OpenOptions::new().write(true).create(true).truncate(true).open("compaction.log")?;
+        for (key, value) in self.keydir {
+            let actual_value = self.get(&key).unwrap().unwrap();
+            let record = self.encode_record(&key, &actual_value).unwrap();
+            compacted_log.write_all(record);
+        }
+    }
+ 
     fn read_record(reader: &mut impl Read) -> io::Result<Option<DecodedRecord>> {
         let mut header = [0u8; HEADER_LEN];
 
