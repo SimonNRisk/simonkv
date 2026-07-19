@@ -29,11 +29,12 @@ const DELETE_TAG: u8 = 0x02; // Just a hex representation for 2
 
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
         let log = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
-            .open(path)?;
+            .open(&path)?;
 
         let mut keydir = HashMap::new();
         let mut reader = &log;
@@ -55,7 +56,7 @@ impl KVStore {
                 None => break,
             }
         }
-        Ok(KVStore { keydir, log })
+        Ok(KVStore { keydir, log, path })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
         let record = Self::encode_set(&key, &value)?;
