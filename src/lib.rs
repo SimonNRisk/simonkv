@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct KVStore {
     keydir: HashMap<String, Location>,
     log: File,
+    path: PathBuf,
 }
 
 enum Command {
@@ -28,11 +29,12 @@ const DELETE_TAG: u8 = 0x02; // Just a hex representation for 2
 
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
         let log = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
-            .open(path)?;
+            .open(&path)?;
 
         let mut keydir = HashMap::new();
         let mut reader = &log;
@@ -54,7 +56,7 @@ impl KVStore {
                 None => break,
             }
         }
-        Ok(KVStore { keydir, log })
+        Ok(KVStore { keydir, log, path })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
         let record = Self::encode_set(&key, &value)?;
@@ -92,6 +94,39 @@ impl KVStore {
         self.keydir.remove(key);
         Ok(old_value)
     }
+
+    pub fn compact(&mut self) -> io::Result<()> {
+        let mut compact_path = self.path.as_os_str().to_os_string();
+        compact_path.push(".compact");
+        let compact_path = PathBuf::from(compact_path);
+
+        let mut compacted_log = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&compact_path)?;
+
+        let keys: Vec<String> = self.keydir.keys().cloned().collect();
+
+        for key in keys {
+            let value = self.get(&key)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "keydir contains a missing key")
+            })?;
+            let record = Self::encode_set(&key, &value)?; // DELs wont be in keydir.keys()
+            compacted_log.write_all(&record)?;
+        }
+        compacted_log.sync_all()?;
+        drop(compacted_log);
+
+        std::fs::rename(&compact_path, &self.path)?;
+
+        // Recreates kedir and updates self.log handle
+        let reopened_store = Self::open(&self.path)?;
+        *self = reopened_store;
+
+        Ok(())
+    }
+
     fn read_record(reader: &mut impl Read) -> io::Result<Option<DecodedRecord>> {
         let mut header = [0u8; HEADER_LEN];
 
@@ -424,5 +459,68 @@ mod tests {
         let mut store = KVStore::open(file).unwrap();
 
         assert_eq!(store.get(key).unwrap(), Some(value.to_string()));
+    }
+
+    #[test]
+    fn compact_writes_only_latest_live_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.log");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("K".into(), "old".into()).unwrap();
+        store.set("K".into(), "new".into()).unwrap();
+
+        store.set("deleted".into(), "value".into()).unwrap();
+        store.delete("deleted").unwrap();
+
+        store.compact().unwrap();
+
+        let mut compact_path = path.as_os_str().to_os_string();
+        compact_path.push(".compact");
+        let compact_path = PathBuf::from(compact_path);
+        let actual = std::fs::read(&path).unwrap();
+        let expected = KVStore::encode_set("K", "new").unwrap();
+
+        assert_eq!(actual, expected);
+        assert!(!compact_path.exists());
+        assert_eq!(store.get("K").unwrap(), Some("new".into()));
+        assert_eq!(store.get("deleted").unwrap(), None);
+    }
+
+    #[test]
+    fn compacted_store_accepts_new_writes_and_reopens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.log");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("before".into(), "compaction".into()).unwrap();
+        store.compact().unwrap();
+        store.set("after".into(), "compaction".into()).unwrap();
+
+        drop(store);
+
+        let mut reopened_store = KVStore::open(&path).unwrap();
+        assert_eq!(
+            reopened_store.get("before").unwrap(),
+            Some("compaction".into())
+        );
+        assert_eq!(
+            reopened_store.get("after").unwrap(),
+            Some("compaction".into())
+        );
+    }
+
+    #[test]
+    fn store_ending_in_compact_survives() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.compact");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("key".into(), "value".into()).unwrap();
+        store.set("key".into(), "better value".into()).unwrap();
+
+        store.compact().unwrap();
+
+        assert_eq!(store.get("key").unwrap(), Some("better value".into()));
     }
 }
