@@ -474,9 +474,35 @@ mod tests {
         store.compact().unwrap();
 
         let compact_path = path.with_extension("compact");
-        let actual = std::fs::read(compact_path).unwrap();
+        let actual = std::fs::read(&path).unwrap();
         let expected = KVStore::encode_set("K", "new").unwrap();
 
         assert_eq!(actual, expected);
+        assert!(!compact_path.exists());
+        assert_eq!(store.get("K").unwrap(), Some("new".into()));
+        assert_eq!(store.get("deleted").unwrap(), None);
+    }
+
+    #[test]
+    fn compacted_store_accepts_new_writes_and_reopens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.log");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("before".into(), "compaction".into()).unwrap();
+        store.compact().unwrap();
+        store.set("after".into(), "compaction".into()).unwrap();
+
+        drop(store);
+
+        let mut reopened_store = KVStore::open(&path).unwrap();
+        assert_eq!(
+            reopened_store.get("before").unwrap(),
+            Some("compaction".into())
+        );
+        assert_eq!(
+            reopened_store.get("after").unwrap(),
+            Some("compaction".into())
+        );
     }
 }
