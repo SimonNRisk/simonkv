@@ -114,6 +114,14 @@ impl KVStore {
             compacted_log.write_all(&record)?;
         }
         compacted_log.sync_all()?;
+        drop(compacted_log);
+
+        std::fs::rename(&compact_path, &self.path)?;
+
+        // Recreates kedir and updates self.log handle
+        let reopened_store = Self::open(&self.path)?;
+        *self = reopened_store;
+
         Ok(())
     }
 
