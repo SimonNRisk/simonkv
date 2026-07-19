@@ -95,16 +95,28 @@ impl KVStore {
         Ok(old_value)
     }
 
-
     pub fn compact(&mut self) -> io::Result<()> {
-        let compacted_log = OpenOptions::new().write(true).create(true).truncate(true).open("compaction.log")?;
-        for (key, value) in self.keydir {
-            let actual_value = self.get(&key).unwrap().unwrap();
-            let record = self.encode_record(&key, &actual_value).unwrap();
-            compacted_log.write_all(record);
+        let compact_path = self.path.with_extension("compact");
+
+        let mut compacted_log = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&compact_path)?;
+
+        let keys: Vec<String> = self.keydir.keys().cloned().collect();
+
+        for key in keys {
+            let value = self.get(&key)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "keydir contains a missing key")
+            })?;
+            let record = Self::encode_set(&key, &value)?; // DELs wont be in keydir.keys()
+            compacted_log.write_all(&record)?;
         }
+        compacted_log.sync_all()?;
+        Ok(())
     }
- 
+
     fn read_record(reader: &mut impl Read) -> io::Result<Option<DecodedRecord>> {
         let mut header = [0u8; HEADER_LEN];
 
