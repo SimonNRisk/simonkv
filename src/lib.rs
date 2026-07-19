@@ -96,7 +96,9 @@ impl KVStore {
     }
 
     pub fn compact(&mut self) -> io::Result<()> {
-        let compact_path = self.path.with_extension("compact");
+        let mut compact_path = self.path.as_os_str().to_os_string();
+        compact_path.push(".compact");
+        let compact_path = PathBuf::from(compact_path);
 
         let mut compacted_log = OpenOptions::new()
             .write(true)
@@ -473,7 +475,9 @@ mod tests {
 
         store.compact().unwrap();
 
-        let compact_path = path.with_extension("compact");
+        let mut compact_path = path.as_os_str().to_os_string();
+        compact_path.push(".compact");
+        let compact_path = PathBuf::from(compact_path);
         let actual = std::fs::read(&path).unwrap();
         let expected = KVStore::encode_set("K", "new").unwrap();
 
@@ -504,5 +508,19 @@ mod tests {
             reopened_store.get("after").unwrap(),
             Some("compaction".into())
         );
+    }
+
+    #[test]
+    fn store_ending_in_compact_survives() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.compact");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("key".into(), "value".into()).unwrap();
+        store.set("key".into(), "better value".into()).unwrap();
+
+        store.compact().unwrap();
+
+        assert_eq!(store.get("key").unwrap(), Some("better value".into()));
     }
 }
