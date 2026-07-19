@@ -450,4 +450,25 @@ mod tests {
 
         assert_eq!(store.get(key).unwrap(), Some(value.to_string()));
     }
+
+    #[test]
+    fn compact_writes_only_latest_live_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.log");
+        let mut store = KVStore::open(&path).unwrap();
+
+        store.set("K".into(), "old".into()).unwrap();
+        store.set("K".into(), "new".into()).unwrap();
+
+        store.set("deleted".into(), "value".into()).unwrap();
+        store.delete("deleted").unwrap();
+
+        store.compact().unwrap();
+
+        let compact_path = path.with_extension("compact");
+        let actual = std::fs::read(compact_path).unwrap();
+        let expected = KVStore::encode_set("K", "new").unwrap();
+
+        assert_eq!(actual, expected);
+    }
 }
