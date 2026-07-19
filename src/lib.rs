@@ -1,16 +1,25 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub struct KVStore {
-    map: HashMap<String, String>,
+    keydir: HashMap<String, Location>,
     log: File,
 }
 
 enum Command {
     Set(String, String),
     Delete(String),
+}
+
+struct Location {
+    offset: u64,
+}
+
+struct DecodedRecord {
+    command: Command,
+    length: u64,
 }
 
 const HEADER_LEN: usize = 1 + 2 + 4;
@@ -25,32 +34,65 @@ impl KVStore {
             .read(true)
             .open(path)?;
 
-        let mut map = HashMap::new();
+        let mut keydir = HashMap::new();
         let mut reader = &log;
+        let mut offset = 0u64;
 
         loop {
             match Self::read_record(&mut reader)? {
-                Some(command) => Self::apply_command(&mut map, command),
+                Some(record) => {
+                    match record.command {
+                        Command::Set(key, _) => {
+                            keydir.insert(key, Location { offset });
+                        }
+                        Command::Delete(key) => {
+                            keydir.remove(&key);
+                        }
+                    }
+                    offset += record.length;
+                }
                 None => break,
             }
         }
-        Ok(KVStore { map, log })
+        Ok(KVStore { keydir, log })
     }
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
         let record = Self::encode_set(&key, &value)?;
+        let offset = self.log.metadata()?.len();
         self.log.write_all(&record)?;
-        self.map.insert(key, value);
+        self.keydir.insert(key, Location { offset });
         Ok(())
     }
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.map.get(key).map(|v| v.as_str())
+    pub fn get(&mut self, key: &str) -> io::Result<Option<String>> {
+        let Some(location) = self.keydir.get(key) else {
+            return Ok(None);
+        };
+
+        self.log.seek(SeekFrom::Start(location.offset))?;
+
+        let Some(record) = Self::read_record(&mut self.log)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "keydir points past the end of the log",
+            ));
+        };
+
+        match record.command {
+            Command::Set(record_key, value) if record_key == key => Ok(Some(value)),
+            Command::Set(_, _) | Command::Delete(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "keydir points to the wrong record",
+            )),
+        }
     }
     pub fn delete(&mut self, key: &str) -> io::Result<Option<String>> {
+        let old_value = self.get(key)?;
         let record = Self::encode_delete(key)?;
         self.log.write_all(&record)?;
-        Ok(self.map.remove(key))
+        self.keydir.remove(key);
+        Ok(old_value)
     }
-    fn read_record(reader: &mut impl Read) -> io::Result<Option<Command>> {
+    fn read_record(reader: &mut impl Read) -> io::Result<Option<DecodedRecord>> {
         let mut header = [0u8; HEADER_LEN];
 
         // A clean EOF before a new record is normal. Once the first byte
@@ -93,8 +135,14 @@ impl KVStore {
         })?;
 
         match operation {
-            SET_TAG => Ok(Some(Command::Set(key, value))),
-            DELETE_TAG => Ok(Some(Command::Delete(key))),
+            SET_TAG => Ok(Some(DecodedRecord {
+                command: Command::Set(key, value),
+                length: (HEADER_LEN + key_len + value_len) as u64,
+            })),
+            DELETE_TAG => Ok(Some(DecodedRecord {
+                command: Command::Delete(key),
+                length: (HEADER_LEN + key_len + value_len) as u64,
+            })),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unknown log operation",
@@ -102,16 +150,6 @@ impl KVStore {
         }
     }
 
-    fn apply_command(map: &mut HashMap<String, String>, command: Command) {
-        match command {
-            Command::Set(key, value) => {
-                map.insert(key, value);
-            }
-            Command::Delete(key) => {
-                map.remove(&key);
-            }
-        }
-    }
     fn encode_header(operation: u8, key_len: u16, value_len: u32) -> [u8; HEADER_LEN] {
         let mut header = [0u8; HEADER_LEN];
 
@@ -175,21 +213,21 @@ mod tests {
         let key = "K";
         let val = "V";
         store.set(key.into(), val.into()).unwrap();
-        assert_eq!(store.get(key), Some(val));
+        assert_eq!(store.get(key).unwrap(), Some(val.to_string()));
     }
 
     #[test]
     fn get_empty_value_returns_none() {
-        let (store, _) = make_store();
-        assert_eq!(store.get("K".into()), None);
+        let (mut store, _) = make_store();
+        assert_eq!(store.get("K").unwrap(), None);
     }
 
     #[test]
     fn get_empty_value_is_distinct_from_missing() {
         let (mut store, _) = make_store();
         store.set("K".into(), "".into()).unwrap();
-        assert_eq!(store.get("K"), Some(""));
-        assert_eq!(store.get("absent"), None);
+        assert_eq!(store.get("K").unwrap(), Some(String::new()));
+        assert_eq!(store.get("absent").unwrap(), None);
     }
 
     #[test]
@@ -210,7 +248,7 @@ mod tests {
 
         store.set(key.into(), val.into()).unwrap();
         assert_eq!(store.delete(key).unwrap(), Some(val.to_string()));
-        assert_eq!(store.get(key), None);
+        assert_eq!(store.get(key).unwrap(), None);
     }
 
     #[test]
@@ -277,8 +315,8 @@ mod tests {
 
         drop(store);
 
-        let store = KVStore::open(file.path()).unwrap();
-        assert_eq!(store.get("K"), Some("V"));
+        let mut store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K").unwrap(), Some("V".to_string()));
     }
 
     #[test]
@@ -290,8 +328,8 @@ mod tests {
 
         drop(store);
 
-        let store = KVStore::open(file.path()).unwrap();
-        assert_eq!(store.get("K"), Some("V2"));
+        let mut store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K").unwrap(), Some("V2".to_string()));
     }
 
     #[test]
@@ -305,9 +343,9 @@ mod tests {
 
         drop(store);
 
-        let store = KVStore::open(file.path()).unwrap();
-        assert_eq!(store.get("K"), None);
-        assert_eq!(store.get("K2"), Some("V2"));
+        let mut store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K").unwrap(), None);
+        assert_eq!(store.get("K2").unwrap(), Some("V2".to_string()));
     }
 
     fn assert_open_rejects(bytes: &[u8]) {
@@ -367,9 +405,9 @@ mod tests {
 
         drop(store);
 
-        let store = KVStore::open(file).unwrap();
+        let mut store = KVStore::open(file).unwrap();
 
-        assert_eq!(store.get(key), Some(value));
+        assert_eq!(store.get(key).unwrap(), Some(value.to_string()));
     }
 
     #[test]
@@ -383,8 +421,8 @@ mod tests {
 
         drop(store);
 
-        let store = KVStore::open(file).unwrap();
+        let mut store = KVStore::open(file).unwrap();
 
-        assert_eq!(store.get(key), Some(value));
+        assert_eq!(store.get(key).unwrap(), Some(value.to_string()));
     }
 }

@@ -5,13 +5,13 @@ fn main() {
 
     kvstore.set(String::from("K"), String::from("V")).unwrap();
 
-    let fetched_val = kvstore.get("K");
+    let fetched_val = kvstore.get("K").unwrap();
     match fetched_val {
         Some(val) => println!("Got {val}"),
         None => println!("No value"),
     }
 
-    let fetched_fake_val = kvstore.get("Fake");
+    let fetched_fake_val = kvstore.get("Fake").unwrap();
     match fetched_fake_val {
         Some(val) => println!("Got {val}"),
         None => println!("No value"),
