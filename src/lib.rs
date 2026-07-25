@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -228,6 +229,21 @@ impl KVStore {
         result.extend_from_slice(value_bytes);
 
         Ok(result)
+    }
+}
+
+impl fmt::Display for KVStore {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut first = true;
+        for (key, location) in &self.keydir {
+            if !first {
+                write!(f, ", ")?;
+            }
+            let offset = location.offset;
+            write!(f, "{{{key}: {offset}}}")?;
+            first = false
+        }
+        Ok(())
     }
 }
 
