@@ -1,0 +1,21 @@
+name: Rust checks
+
+on:
+    pull_request:
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+
+        steps:
+            # Checkout code with stable gh action
+            - uses: actions/checkout@v4
+
+            # Install Rust, Clippy, and rustfmt
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                    components: clippy, rustfmt
+            # Run commands in repo
+            - run: cargo fmt --all -- --check
+            - run: cargo clippy --all-targets --all-features -- -D warnings
+            - run: cargo test
