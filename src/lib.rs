@@ -41,21 +41,16 @@ impl KVStore {
         let mut reader = &log;
         let mut offset = 0u64;
 
-        loop {
-            match Self::read_record(&mut reader)? {
-                Some(record) => {
-                    match record.command {
-                        Command::Set(key, _) => {
-                            keydir.insert(key, Location { offset });
-                        }
-                        Command::Delete(key) => {
-                            keydir.remove(&key);
-                        }
-                    }
-                    offset += record.length;
+        while let Some(record) = Self::read_record(&mut reader)? {
+            match record.command {
+                Command::Set(key, _) => {
+                    keydir.insert(key, Location { offset });
                 }
-                None => break,
+                Command::Delete(key) => {
+                    keydir.remove(&key);
+                }
             }
+            offset += record.length;
         }
         Ok(KVStore { keydir, log, path })
     }
