@@ -43,6 +43,8 @@ fn main() {
     }
 
     println!("Compacting...");
+
     kvstore.compact().unwrap();
+
     println!("Compacted kvstore: {kvstore}");
 }
