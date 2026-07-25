@@ -323,7 +323,7 @@ mod tests {
     fn del_writes_to_log() {
         let (mut store, file) = make_store();
 
-        store.delete("K".into()).unwrap();
+        store.delete("K").unwrap();
 
         drop(store);
 
