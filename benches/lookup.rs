@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use simonkv::KVStore;
 use tempfile::NamedTempFile;
 
@@ -10,12 +10,11 @@ struct KVPair {
 fn create_dataset(num_entries: usize) -> Vec<KVPair> {
     let mut dataset = Vec::with_capacity(num_entries);
     for i in 0..num_entries {
-        let key = format!("{i}"); 
-        let value = format!("String from {i}"); 
-        dataset.push(KVPair {key, value})
+        let key = format!("{i}");
+        let value = format!("String from {i}");
+        dataset.push(KVPair { key, value })
     }
     dataset
-
 }
 
 fn kvstore_set_vector(pairs: Vec<KVPair>, kvstore: &mut KVStore) {
