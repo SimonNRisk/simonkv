@@ -37,6 +37,12 @@ impl KVStore {
             .read(true)
             .open(&path)?;
 
+        Self::from_open_log(path, log)
+    }
+
+    fn from_open_log(path: PathBuf, mut log: File) -> io::Result<Self> {
+        log.seek(SeekFrom::Start(0))?;
+
         let mut keydir = HashMap::new();
         let mut reader = &log;
         let mut offset = 0u64;
@@ -54,6 +60,7 @@ impl KVStore {
         }
         Ok(KVStore { keydir, log, path })
     }
+
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
         let record = Self::encode_set(&key, &value)?;
         let offset = self.log.metadata()?.len();
@@ -364,6 +371,24 @@ mod tests {
         drop(store);
 
         let mut store = KVStore::open(file.path()).unwrap();
+        assert_eq!(store.get("K").unwrap(), Some("V".to_string()));
+    }
+
+    #[test]
+    fn open_replays_from_start_when_file_cursor_is_at_end() {
+        let file = NamedTempFile::new().unwrap();
+        let record = KVStore::encode_set("K", "V").unwrap();
+        std::fs::write(file.path(), record).unwrap();
+
+        let mut log = OpenOptions::new()
+            .append(true)
+            .read(true)
+            .open(file.path())
+            .unwrap();
+        log.seek(SeekFrom::End(0)).unwrap();
+
+        let mut store = KVStore::from_open_log(file.path().to_path_buf(), log).unwrap();
+
         assert_eq!(store.get("K").unwrap(), Some("V".to_string()));
     }
 
