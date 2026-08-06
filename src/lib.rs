@@ -134,9 +134,19 @@ impl KVStore {
             compacted_log.write_all(&record)?;
         }
         compacted_log.sync_all()?;
+
+        // Some OS require file to be closed to rename
         drop(compacted_log);
 
         std::fs::rename(&compact_path, &self.path)?;
+
+        // Persist the directory entry changed by rename before accepting new writes
+        let parent_directory = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent_directory)?.sync_all()?;
 
         // Recreates kedir and updates self.log handle
         let reopened_store = Self::open(&self.path)?;
