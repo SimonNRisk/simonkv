@@ -523,6 +523,22 @@ mod tests {
     }
 
     #[test]
+    fn length_corruption_returns_error_without_truncating_log() {
+        let file = NamedTempFile::new().unwrap();
+        let mut record = KVStore::encode_set("K", "V").unwrap();
+        record[6] = 0x02;
+        std::fs::write(file.path(), &record).unwrap();
+
+        let result = KVStore::open(file.path());
+
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(std::fs::read(file.path()).unwrap(), record);
+    }
+
+    #[test]
     fn valid_records_before_truncated_tail_are_recovered() {
         let file = NamedTempFile::new().unwrap();
         let mut bytes = KVStore::encode_set("K1", "V1").unwrap();
