@@ -58,6 +58,7 @@ impl KVStore {
         let record = Self::encode_set(&key, &value)?;
         let offset = self.log.metadata()?.len();
         self.log.write_all(&record)?;
+        self.log.sync_data()?;
         self.keydir.insert(key, Location { offset });
         Ok(())
     }
@@ -87,6 +88,7 @@ impl KVStore {
         let old_value = self.get(key)?;
         let record = Self::encode_delete(key)?;
         self.log.write_all(&record)?;
+        self.log.sync_data()?;
         self.keydir.remove(key);
         Ok(old_value)
     }
