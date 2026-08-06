@@ -44,10 +44,21 @@ impl KVStore {
         log.seek(SeekFrom::Start(0))?;
 
         let mut keydir = HashMap::new();
-        let mut reader = &log;
         let mut offset = 0u64;
 
-        while let Some(record) = Self::read_record(&mut reader)? {
+        loop {
+            let record = match Self::read_record(&mut log) {
+                Ok(Some(record)) => record,
+                Ok(None) => break,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    // Remove the torn tail so future writes follow the last valid record.
+                    log.set_len(offset)?;
+                    log.sync_data()?;
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+
             match record.command {
                 Command::Set(key, _) => {
                     keydir.insert(key, Location { offset });
@@ -148,7 +159,7 @@ impl KVStore {
         // At this point, we know we have content to read
         reader.read_exact(&mut header[1..]).map_err(|error| {
             if error.kind() == io::ErrorKind::UnexpectedEof {
-                io::Error::new(io::ErrorKind::InvalidData, "truncated log header")
+                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated log header")
             } else {
                 error
             }
@@ -161,7 +172,7 @@ impl KVStore {
         let mut payload = vec![0u8; key_len + value_len];
         reader.read_exact(&mut payload).map_err(|error| {
             if error.kind() == io::ErrorKind::UnexpectedEof {
-                io::Error::new(io::ErrorKind::InvalidData, "truncated log payload")
+                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated log payload")
             } else {
                 error
             }
@@ -433,19 +444,29 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
+    fn assert_truncated_log_is_recovered_as_empty(bytes: &[u8]) {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+
+        let store = KVStore::open(file.path()).unwrap();
+
+        assert!(store.keydir.is_empty());
+        assert_eq!(std::fs::metadata(file.path()).unwrap().len(), 0);
+    }
+
     #[test]
     fn unknown_operation_returns_error() {
         assert_open_rejects(&[0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
-    fn truncated_header_returns_error() {
-        assert_open_rejects(&[SET_TAG, 0x00]);
+    fn truncated_header_is_discarded() {
+        assert_truncated_log_is_recovered_as_empty(&[SET_TAG, 0x00]);
     }
 
     #[test]
-    fn truncated_payload_returns_error() {
-        assert_open_rejects(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]);
+    fn truncated_payload_is_discarded() {
+        assert_truncated_log_is_recovered_as_empty(&[SET_TAG, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]);
     }
 
     #[test]
@@ -454,10 +475,19 @@ mod tests {
     }
 
     #[test]
-    fn valid_record_followed_by_truncated_record_returns_error() {
+    fn valid_records_before_truncated_tail_are_recovered() {
+        let file = NamedTempFile::new().unwrap();
         let mut bytes = KVStore::encode_set("K1", "V1").unwrap();
-        bytes.extend_from_slice(&[SET_TAG, 0x00]);
-        assert_open_rejects(&bytes);
+        let valid_length = bytes.len() as u64;
+        let second_record = KVStore::encode_set("K2", "V2").unwrap();
+        bytes.extend_from_slice(&second_record[..second_record.len() - 1]);
+        std::fs::write(file.path(), bytes).unwrap();
+
+        let mut store = KVStore::open(file.path()).unwrap();
+
+        assert_eq!(store.get("K1").unwrap(), Some("V1".to_string()));
+        assert_eq!(store.get("K2").unwrap(), None);
+        assert_eq!(std::fs::metadata(file.path()).unwrap().len(), valid_length);
     }
 
     #[test]
