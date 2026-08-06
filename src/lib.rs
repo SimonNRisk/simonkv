@@ -454,10 +454,17 @@ mod tests {
     }
 
     #[test]
-    fn valid_record_followed_by_truncated_record_returns_error() {
+    fn valid_records_before_truncated_tail_are_recovered() {
+        let file = NamedTempFile::new().unwrap();
         let mut bytes = KVStore::encode_set("K1", "V1").unwrap();
-        bytes.extend_from_slice(&[SET_TAG, 0x00]);
-        assert_open_rejects(&bytes);
+        let second_record = KVStore::encode_set("K2", "V2").unwrap();
+        bytes.extend_from_slice(&second_record[..second_record.len() - 1]);
+        std::fs::write(file.path(), bytes).unwrap();
+
+        let mut store = KVStore::open(file.path()).unwrap();
+
+        assert_eq!(store.get("K1").unwrap(), Some("V1".to_string()));
+        assert_eq!(store.get("K2").unwrap(), None);
     }
 
     #[test]
