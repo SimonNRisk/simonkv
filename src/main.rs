@@ -2,8 +2,10 @@ use simonkv::KVStore;
 
 fn main() {
     /*
-       Remember when inspecting logs, byte offsets include header and key
+       Remember when inspecting logs, byte offsets include the whole record:
        Header = Operation (1 byte) + Key Length (2 bytes) + Value Length (4 bytes) = 7 bytes
+       Record = Header + Header CRC32 + Key + Value + Record CRC32
+       Each CRC32 checksum is 4 bytes. The header CRC is verified before trusting the lengths.
     */
 
     let mut kvstore = KVStore::open("simonkv.log").unwrap();
