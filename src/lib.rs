@@ -168,15 +168,38 @@ impl KVStore {
         })?;
 
         let operation = header[0];
-        let key_len = u16::from_be_bytes([header[1], header[2]]) as usize;
-        let value_len = u32::from_be_bytes([header[3], header[4], header[5], header[6]]) as usize;
-
         if !matches!(operation, SET_TAG | DELETE_TAG) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unknown log operation",
             ));
         }
+
+        let mut stored_header_checksum = [0u8; CHECKSUM_LEN];
+        reader
+            .read_exact(&mut stored_header_checksum)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::UnexpectedEof {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "truncated log header checksum",
+                    )
+                } else {
+                    error
+                }
+            })?;
+
+        let stored_header_checksum = u32::from_be_bytes(stored_header_checksum);
+        let computed_header_checksum = Self::checksum(&header, &[]);
+        if stored_header_checksum != computed_header_checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record header checksum mismatch",
+            ));
+        }
+
+        let key_len = u16::from_be_bytes([header[1], header[2]]) as usize;
+        let value_len = u32::from_be_bytes([header[3], header[4], header[5], header[6]]) as usize;
 
         let mut payload = vec![0u8; key_len + value_len];
         reader.read_exact(&mut payload).map_err(|error| {
@@ -215,11 +238,11 @@ impl KVStore {
         match operation {
             SET_TAG => Ok(Some(DecodedRecord {
                 command: Command::Set(key, value),
-                length: (HEADER_LEN + key_len + value_len + CHECKSUM_LEN) as u64,
+                length: (HEADER_LEN + key_len + value_len + 2 * CHECKSUM_LEN) as u64,
             })),
             DELETE_TAG => Ok(Some(DecodedRecord {
                 command: Command::Delete(key),
-                length: (HEADER_LEN + key_len + value_len + CHECKSUM_LEN) as u64,
+                length: (HEADER_LEN + key_len + value_len + 2 * CHECKSUM_LEN) as u64,
             })),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -269,14 +292,18 @@ impl KVStore {
             .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Value too large"))?;
 
         let header = KVStore::encode_header(operation, key_len, value_len);
+        let header_checksum = Self::checksum(&header, &[]);
 
-        let mut result: Vec<u8> =
-            Vec::with_capacity(header.len() + key_bytes.len() + value_bytes.len() + CHECKSUM_LEN);
+        let mut result: Vec<u8> = Vec::with_capacity(
+            header.len() + key_bytes.len() + value_bytes.len() + 2 * CHECKSUM_LEN,
+        );
 
         result.extend_from_slice(&header);
+        result.extend_from_slice(&header_checksum.to_be_bytes());
+        let payload_start = result.len();
         result.extend_from_slice(key_bytes);
         result.extend_from_slice(value_bytes);
-        let checksum = Self::checksum(&header, &result[HEADER_LEN..]);
+        let checksum = Self::checksum(&header, &result[payload_start..]);
         result.extend_from_slice(&checksum.to_be_bytes());
 
         Ok(result)
@@ -500,6 +527,7 @@ mod tests {
         let header = KVStore::encode_header(SET_TAG, 1, 0);
         let payload = [0xff];
         let mut record = Vec::from(header);
+        record.extend_from_slice(&KVStore::checksum(&header, &[]).to_be_bytes());
         record.extend_from_slice(&payload);
         record.extend_from_slice(&KVStore::checksum(&header, &payload).to_be_bytes());
 
