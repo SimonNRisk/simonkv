@@ -1,45 +1,52 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use simonkv::KVStore;
 use tempfile::NamedTempFile;
 
-struct KVPair {
-    key: String,
-    value: String,
-}
-
-fn create_dataset(num_entries: usize) -> Vec<KVPair> {
-    let mut dataset = Vec::with_capacity(num_entries);
-    for i in 0..num_entries {
-        let key = format!("{i}");
-        let value = format!("String from {i}");
-        dataset.push(KVPair { key, value })
-    }
-    dataset
-}
-
-fn kvstore_set_vector(pairs: Vec<KVPair>, kvstore: &mut KVStore) {
-    for kvpair in pairs {
-        kvstore.set(kvpair.key, kvpair.value).unwrap();
-    }
-}
-
-fn create_benchmark_inputs(num_entries: usize) -> (NamedTempFile, KVStore, Vec<KVPair>) {
+fn make_store() -> (NamedTempFile, KVStore) {
     let file = NamedTempFile::new().unwrap();
-    let kvstore = KVStore::open(file.path()).unwrap();
-    let dataset = create_dataset(num_entries);
-
-    (file, kvstore, dataset)
+    let store = KVStore::open(file.path()).unwrap();
+    (file, store)
 }
 
-fn benchmark_sets(c: &mut Criterion) {
-    c.bench_function("10,000 sets", |b| {
+fn make_populated_store() -> (NamedTempFile, KVStore) {
+    let (file, mut store) = make_store();
+    store.set("key".into(), "v".repeat(100)).unwrap();
+    (file, store)
+}
+
+fn benchmark_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("operations");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("set", |b| {
+        let (_file, mut store) = make_store();
         b.iter_batched(
-            || create_benchmark_inputs(10000),
-            |(_file, mut kvstore, dataset)| kvstore_set_vector(dataset, &mut kvstore),
+            || (String::from("key"), "v".repeat(100)),
+            |(key, value)| store.set(key, value).unwrap(),
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("get", |b| {
+        let (_file, mut store) = make_populated_store();
+        b.iter(|| black_box(store.get("key").unwrap()))
+    });
+
+    group.bench_function("delete", |b| {
+        b.iter_batched(
+            make_populated_store,
+            |(file, mut store)| {
+                let result = store.delete("key").unwrap();
+                (file, store, result)
+            },
             BatchSize::PerIteration,
         )
     });
+
+    group.finish();
 }
 
-criterion_group!(benches, benchmark_sets);
+criterion_group!(benches, benchmark_operations);
 criterion_main!(benches);
