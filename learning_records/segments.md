@@ -38,4 +38,40 @@ A record count would bound different costs:
 
 While potentially a hybrid approach is the best long-term design, we will stick with a bounding record size to best achieve our goal of predictable compaction jobs.
 
-### Merging
+### Maintianing size threshold invariant across merges
+A scenario can occur where we attempt to merge two files whose sum would exceed our file size threshold.
+Example with a 64 MB threshold:
+
+Inputs:
+0001.data = 60 MB
+0002.data = 60 MB
+
+If we suppose 100 MB remains live, we can't merge all to one file.
+To resolve this, we can rotate the output file while scanning two input files record-by-record.
+The merge would do this:
+1. Read live records -> write ~64 MB to output A
+2. Next record will not fit -> rotate output
+3. Write remaining ~36 MB to output B
+
+Result:
+merged-A.data = ~64 MB
+merged-B.data = ~36 MB
+
+### Scope
+For now, we remain single-writer and synchronous: `compact(&mut self)` blocks writes. Background compaction, hint files, and multi-process access will come later.
+Additionally, magic values and versions will be deferred. Headerless segments become an implicit "version 0.", which is fine as we have no consumers.
+
+### Exact rotation rule
+This is really three separate design choices: when to rotate, how strict the bound is, and what to do with oversized records.
+#### Rotate before or after writing
+For SimonKV, we will rotate before writing. It means a segment can never exceed the target by an arbitrarily large record
+
+#### Handle oversized records
+The first question is: can't we just prevent oversized records in the first place? Introduce a hard limit, and bound our segment to always be larger than the max size of record we enforce? Yes, but currently the maximum encoded record can be over 4 GiB. We *could* make our segment that size, but that is an overly large job. Here's why:
+If we merge two segments, each of size S, the worst-case I/O is approximately:
+```
+read inputs: 2S
+write outputs: 2S
+total: 4S
+```
+At
