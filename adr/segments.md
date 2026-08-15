@@ -243,6 +243,25 @@ SimonKV could rotate into automatic compaction after a segment count, a dead-byt
 
 For the MVP, compaction remains manual through `compact()`. This separates correctness of segmented merging from scheduling policy. Later benchmarks can determine whether segment count, dead bytes, or a combination should trigger background work.
 
+### Implementation plan
+
+The work will be split into approximately twelve pull requests:
+
+1. Extract the record codec and scanner, including encoded record lengths.
+2. Add `StoreOptions`, segment-target validation, `SegmentId`, and the expanded `Location`.
+3. Switch from a log file to a store directory, including filename parsing and inventory validation.
+4. Implement ordered multi-segment replay and segment-aware reads.
+5. Implement durable active-segment rotation, including exact-fit and oversized records.
+6. Add startup recovery for torn active tails and missing active files, plus rejection of invalid states.
+7. Add compaction input selection for the oldest one or two segments and oversized segments.
+8. Implement exact live-record selection and safe tombstone removal.
+9. Implement rotating `.merge` output files with fresh IDs.
+10. Implement the complete crash-safe publication protocol and keydir rebuild.
+11. Add interruption tests covering each publication boundary and tombstone resurrection.
+12. Update examples, documentation, and benchmarks for the segmented layout.
+
+Rotation and merge publication are durability protocols, so each will land atomically with its correctness tests rather than being split into individual filesystem operations.
+
 ### Verification
 
 The implementation will need tests covering:
