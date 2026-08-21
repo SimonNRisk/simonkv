@@ -16,7 +16,37 @@ pub struct KVStore {
 }
 
 struct Location {
+    segment_id: u64,
     offset: u64,
+    record_length: u64,
+}
+
+const DEFAULT_SEGMENT_LENGTH: u64 = 64 * 1024 * 1024; // 64MiB
+
+pub struct StoreOptions {
+    segment_length: u64,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            segment_length: DEFAULT_SEGMENT_LENGTH
+        }
+    }
+}
+
+impl StoreOptions {
+    pub fn segment_length(mut self, bytes: u64) {
+        self.segment_length = bytes;
+        self
+    }
+
+    fn validate(self) -> io::Result<()> {
+        if self.segment_length == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Segment length must be greater than zero"))
+        }
+        Ok(())
+    }
 }
 
 impl KVStore {
