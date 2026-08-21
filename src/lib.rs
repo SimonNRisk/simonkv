@@ -1,8 +1,12 @@
-use crc32fast::Hasher;
+mod record;
+mod scanner;
+
+use record::Command;
+use scanner::RecordScanner;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub struct KVStore {
@@ -11,24 +15,39 @@ pub struct KVStore {
     path: PathBuf,
 }
 
-enum Command {
-    Set(String, String),
-    Delete(String),
-}
-
 struct Location {
+    segment_id: u64,
     offset: u64,
+    record_length: u64,
 }
 
-struct DecodedRecord {
-    command: Command,
-    length: u64,
+const DEFAULT_SEGMENT_LENGTH: u64 = 64 * 1024 * 1024; // 64MiB
+
+pub struct StoreOptions {
+    segment_length: u64,
 }
 
-const HEADER_LEN: usize = 1 + 2 + 4;
-const CHECKSUM_LEN: usize = 4;
-const SET_TAG: u8 = 0x01; // Just a hex representation for 1
-const DELETE_TAG: u8 = 0x02; // Just a hex representation for 2
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            segment_length: DEFAULT_SEGMENT_LENGTH
+        }
+    }
+}
+
+impl StoreOptions {
+    pub fn segment_length(mut self, bytes: u64) {
+        self.segment_length = bytes;
+        self
+    }
+
+    fn validate(self) -> io::Result<()> {
+        if self.segment_length == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Segment length must be greater than zero"))
+        }
+        Ok(())
+    }
+}
 
 impl KVStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -46,36 +65,48 @@ impl KVStore {
         log.seek(SeekFrom::Start(0))?;
 
         let mut keydir = HashMap::new();
-        let mut offset = 0u64;
+        let torn_tail_start = {
+            let mut scanner = RecordScanner::new(&mut log);
+            let mut last_valid_end = 0;
 
-        loop {
-            let record = match Self::read_record(&mut log) {
-                Ok(Some(record)) => record,
-                Ok(None) => break,
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    // Remove the torn tail so future writes follow the last valid record.
-                    log.set_len(offset)?;
-                    log.sync_data()?;
-                    break;
-                }
-                Err(error) => return Err(error),
-            };
+            loop {
+                let record = match scanner.next() {
+                    Some(Ok(record)) => record,
+                    None => break None,
+                    Some(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                        break Some(last_valid_end);
+                    }
+                    Some(Err(error)) => return Err(error),
+                };
 
-            match record.command {
-                Command::Set(key, _) => {
-                    keydir.insert(key, Location { offset });
-                }
-                Command::Delete(key) => {
-                    keydir.remove(&key);
+                last_valid_end = record.offset + record.record_len;
+                match record.command {
+                    Command::Set(key, _) => {
+                        keydir.insert(
+                            key,
+                            Location {
+                                offset: record.offset,
+                            },
+                        );
+                    }
+                    Command::Delete(key) => {
+                        keydir.remove(&key);
+                    }
                 }
             }
-            offset += record.length;
+        };
+
+        if let Some(torn_tail_start) = torn_tail_start {
+            // Remove the torn tail so future writes follow the last valid record.
+            log.set_len(torn_tail_start)?;
+            log.sync_data()?;
         }
+
         Ok(KVStore { keydir, log, path })
     }
 
     pub fn set(&mut self, key: String, value: String) -> io::Result<()> {
-        let record = Self::encode_set(&key, &value)?;
+        let record = record::encode_set(&key, &value)?;
         let offset = self.log.metadata()?.len();
         self.log.write_all(&record)?;
         self.log.sync_data()?;
@@ -89,7 +120,7 @@ impl KVStore {
 
         self.log.seek(SeekFrom::Start(location.offset))?;
 
-        let Some(record) = Self::read_record(&mut self.log)? else {
+        let Some(record) = record::decode(&mut self.log)? else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "keydir points past the end of the log",
@@ -106,7 +137,7 @@ impl KVStore {
     }
     pub fn delete(&mut self, key: &str) -> io::Result<Option<String>> {
         let old_value = self.get(key)?;
-        let record = Self::encode_delete(key)?;
+        let record = record::encode_delete(key)?;
         self.log.write_all(&record)?;
         self.log.sync_data()?;
         self.keydir.remove(key);
@@ -130,7 +161,7 @@ impl KVStore {
             let value = self.get(&key)?.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "keydir contains a missing key")
             })?;
-            let record = Self::encode_set(&key, &value)?; // DELs wont be in keydir.keys()
+            let record = record::encode_set(&key, &value)?; // DELs wont be in keydir.keys()
             compacted_log.write_all(&record)?;
         }
         compacted_log.sync_all()?;
@@ -154,170 +185,6 @@ impl KVStore {
 
         Ok(())
     }
-
-    fn read_record(reader: &mut impl Read) -> io::Result<Option<DecodedRecord>> {
-        let mut header = [0u8; HEADER_LEN];
-
-        // A clean EOF before a new record is normal. Once the first byte
-        // exists, however, the rest of the header must also exist.
-        match reader.read_exact(&mut header[..1]) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        }
-
-        // At this point, we know we have content to read
-        reader.read_exact(&mut header[1..]).map_err(|error| {
-            if error.kind() == io::ErrorKind::UnexpectedEof {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated log header")
-            } else {
-                error
-            }
-        })?;
-
-        let operation = header[0];
-        if !matches!(operation, SET_TAG | DELETE_TAG) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unknown log operation",
-            ));
-        }
-
-        let mut stored_header_checksum = [0u8; CHECKSUM_LEN];
-        reader
-            .read_exact(&mut stored_header_checksum)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::UnexpectedEof {
-                    io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "truncated log header checksum",
-                    )
-                } else {
-                    error
-                }
-            })?;
-
-        let stored_header_checksum = u32::from_be_bytes(stored_header_checksum);
-        let computed_header_checksum = Self::checksum(&header, &[]);
-        if stored_header_checksum != computed_header_checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "record header checksum mismatch",
-            ));
-        }
-
-        let key_len = u16::from_be_bytes([header[1], header[2]]) as usize;
-        let value_len = u32::from_be_bytes([header[3], header[4], header[5], header[6]]) as usize;
-
-        let mut payload = vec![0u8; key_len + value_len];
-        reader.read_exact(&mut payload).map_err(|error| {
-            if error.kind() == io::ErrorKind::UnexpectedEof {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated log payload")
-            } else {
-                error
-            }
-        })?;
-
-        let mut stored_checksum = [0u8; CHECKSUM_LEN];
-        reader.read_exact(&mut stored_checksum).map_err(|error| {
-            if error.kind() == io::ErrorKind::UnexpectedEof {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "truncated log checksum")
-            } else {
-                error
-            }
-        })?;
-
-        let stored_checksum = u32::from_be_bytes(stored_checksum);
-        let computed_checksum = Self::checksum(&header, &payload);
-        if stored_checksum != computed_checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "record checksum mismatch",
-            ));
-        }
-
-        let key = String::from_utf8(payload[..key_len].to_vec()).map_err(|_error| {
-            io::Error::new(io::ErrorKind::InvalidData, "log key is not valid UTF-8")
-        })?;
-        let value = String::from_utf8(payload[key_len..].to_vec()).map_err(|_error| {
-            io::Error::new(io::ErrorKind::InvalidData, "log value is not valid UTF-8")
-        })?;
-
-        match operation {
-            SET_TAG => Ok(Some(DecodedRecord {
-                command: Command::Set(key, value),
-                length: (HEADER_LEN + key_len + value_len + 2 * CHECKSUM_LEN) as u64,
-            })),
-            DELETE_TAG => Ok(Some(DecodedRecord {
-                command: Command::Delete(key),
-                length: (HEADER_LEN + key_len + value_len + 2 * CHECKSUM_LEN) as u64,
-            })),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unknown log operation",
-            )),
-        }
-    }
-
-    fn encode_header(operation: u8, key_len: u16, value_len: u32) -> [u8; HEADER_LEN] {
-        let mut header = [0u8; HEADER_LEN];
-
-        header[0] = operation;
-
-        header[1..3].copy_from_slice(&key_len.to_be_bytes());
-        header[3..7].copy_from_slice(&value_len.to_be_bytes());
-
-        header
-    }
-    fn encode_set(key: &str, value: &str) -> io::Result<Vec<u8>> {
-        Self::encode_record(SET_TAG, key, value.as_bytes())
-    }
-
-    fn encode_delete(key: &str) -> io::Result<Vec<u8>> {
-        Self::encode_record(DELETE_TAG, key, &[])
-    }
-
-    fn checksum(header: &[u8], payload: &[u8]) -> u32 {
-        let mut hasher = Hasher::new();
-        hasher.update(header);
-        hasher.update(payload);
-        hasher.finalize()
-    }
-
-    fn encode_record(operation: u8, key: &str, value_bytes: &[u8]) -> io::Result<Vec<u8>> {
-        if !matches!(operation, SET_TAG | DELETE_TAG) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Unsupported operation",
-            ));
-        }
-
-        let key_bytes = key.as_bytes();
-        let key_len = u16::try_from(key_bytes.len())
-            .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Key too large"))?;
-
-        let value_len = u32::try_from(value_bytes.len())
-            .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Value too large"))?;
-
-        let header = KVStore::encode_header(operation, key_len, value_len);
-        let header_checksum = Self::checksum(&header, &[]);
-
-        let mut result: Vec<u8> = Vec::with_capacity(
-            header.len() + key_bytes.len() + value_bytes.len() + 2 * CHECKSUM_LEN,
-        );
-
-        result.extend_from_slice(&header);
-        result.extend_from_slice(&header_checksum.to_be_bytes());
-        let payload_start = result.len();
-        result.extend_from_slice(key_bytes);
-        result.extend_from_slice(value_bytes);
-        let checksum = Self::checksum(&header, &result[payload_start..]);
-        result.extend_from_slice(&checksum.to_be_bytes());
-
-        Ok(result)
-    }
 }
 
 impl fmt::Display for KVStore {
@@ -338,6 +205,9 @@ impl fmt::Display for KVStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::{
+        DELETE_TAG, HEADER_LEN, SET_TAG, checksum, encode_delete, encode_header, encode_set,
+    };
     use tempfile::NamedTempFile;
 
     fn make_store() -> (KVStore, NamedTempFile) {
@@ -406,7 +276,7 @@ mod tests {
         drop(store);
 
         let contents = std::fs::read(file.path()).unwrap();
-        assert_eq!(contents, KVStore::encode_set("K", "V").unwrap());
+        assert_eq!(contents, encode_set("K", "V").unwrap());
     }
 
     #[test]
@@ -418,7 +288,7 @@ mod tests {
         drop(store);
 
         let contents = std::fs::read(file.path()).unwrap();
-        assert_eq!(contents, KVStore::encode_delete("K").unwrap());
+        assert_eq!(contents, encode_delete("K").unwrap());
     }
 
     #[test]
@@ -431,8 +301,8 @@ mod tests {
         drop(store);
 
         let contents = std::fs::read(file.path()).unwrap();
-        let mut expected = KVStore::encode_set("K", "V").unwrap();
-        expected.extend_from_slice(&KVStore::encode_delete("K").unwrap());
+        let mut expected = encode_set("K", "V").unwrap();
+        expected.extend_from_slice(&encode_delete("K").unwrap());
         assert_eq!(contents, expected);
     }
 
@@ -451,7 +321,7 @@ mod tests {
     #[test]
     fn open_replays_from_start_when_file_cursor_is_at_end() {
         let file = NamedTempFile::new().unwrap();
-        let record = KVStore::encode_set("K", "V").unwrap();
+        let record = encode_set("K", "V").unwrap();
         std::fs::write(file.path(), record).unwrap();
 
         let mut log = OpenOptions::new()
@@ -534,19 +404,19 @@ mod tests {
 
     #[test]
     fn invalid_utf8_returns_error() {
-        let header = KVStore::encode_header(SET_TAG, 1, 0);
+        let header = encode_header(SET_TAG, 1, 0);
         let payload = [0xff];
         let mut record = Vec::from(header);
-        record.extend_from_slice(&KVStore::checksum(&header, &[]).to_be_bytes());
+        record.extend_from_slice(&checksum(&header, &[]).to_be_bytes());
         record.extend_from_slice(&payload);
-        record.extend_from_slice(&KVStore::checksum(&header, &payload).to_be_bytes());
+        record.extend_from_slice(&checksum(&header, &payload).to_be_bytes());
 
         assert_open_rejects(&record);
     }
 
     #[test]
     fn payload_corruption_returns_error() {
-        let mut record = KVStore::encode_set("K", "V").unwrap();
+        let mut record = encode_set("K", "V").unwrap();
         record[HEADER_LEN + 1] = b'X';
 
         assert_open_rejects(&record);
@@ -554,7 +424,7 @@ mod tests {
 
     #[test]
     fn operation_corruption_returns_error() {
-        let mut record = KVStore::encode_set("K", "V").unwrap();
+        let mut record = encode_set("K", "V").unwrap();
         record[0] = DELETE_TAG;
 
         assert_open_rejects(&record);
@@ -563,7 +433,7 @@ mod tests {
     #[test]
     fn length_corruption_returns_error_without_truncating_log() {
         let file = NamedTempFile::new().unwrap();
-        let mut record = KVStore::encode_set("K", "V").unwrap();
+        let mut record = encode_set("K", "V").unwrap();
         record[6] = 0x02;
         std::fs::write(file.path(), &record).unwrap();
 
@@ -579,9 +449,9 @@ mod tests {
     #[test]
     fn valid_records_before_truncated_tail_are_recovered() {
         let file = NamedTempFile::new().unwrap();
-        let mut bytes = KVStore::encode_set("K1", "V1").unwrap();
+        let mut bytes = encode_set("K1", "V1").unwrap();
         let valid_length = bytes.len() as u64;
-        let second_record = KVStore::encode_set("K2", "V2").unwrap();
+        let second_record = encode_set("K2", "V2").unwrap();
         bytes.extend_from_slice(&second_record[..second_record.len() - 1]);
         std::fs::write(file.path(), bytes).unwrap();
 
@@ -590,13 +460,6 @@ mod tests {
         assert_eq!(store.get("K1").unwrap(), Some("V1".to_string()));
         assert_eq!(store.get("K2").unwrap(), None);
         assert_eq!(std::fs::metadata(file.path()).unwrap().len(), valid_length);
-    }
-
-    #[test]
-    fn encodes_header() {
-        let header = KVStore::encode_header(SET_TAG, 3, 4);
-
-        assert_eq!(header, [0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04])
     }
 
     #[test]
@@ -649,7 +512,7 @@ mod tests {
         compact_path.push(".compact");
         let compact_path = PathBuf::from(compact_path);
         let actual = std::fs::read(&path).unwrap();
-        let expected = KVStore::encode_set("K", "new").unwrap();
+        let expected = encode_set("K", "new").unwrap();
 
         assert_eq!(actual, expected);
         assert!(!compact_path.exists());
